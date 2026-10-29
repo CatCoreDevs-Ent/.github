@@ -1,0 +1,312 @@
+name: build-image
+
+# Org'un ortak imaj hattı (reusable). Uygulama repoları çağırır:
+#
+#   jobs:
+#     image:
+#       uses: CatCoreDevs-Ent/.github/.github/workflows/build-image.yml@<commit-sha> # v1.0.0
+#       with:
+#         image: hello/web
+#
+# Akış (sadece varsayılan dala push'ta ve elle çalıştırmada yayımlar; PR'da ve diğer dallarda sadece test + build):
+#   gitleaks → test → build (uzak BuildKit) → Zot'a ETİKETSİZ push (digest) → Trivy → cosign imza → SBOM attest
+#   → etiket sha-<commit'in ilk 12 hanesi>
+# Etiket en son konur: Kargo sadece sha-* etiketlerini görür, yani taranmamış, imzasız ya da kritik açıklı bir
+# digest hiçbir ortama gidemez. Etiketsiz kalan digest'leri registry'nin retention'ı siler.
+#
+# Çalıştığı yer: org'un self-hosted runner'ları (catcore-arc). Registry kimliği, imza anahtarı ve BuildKit'in
+# istemci sertifikası runner'ın ortamından gelir (DOCKER_CONFIG, CI_COSIGN_KEY, CI_COSIGN_PASSWORD_FILE,
+# BUILDX_BUILDER, CI_REGISTRY); çağıranın secret vermesi gerekmez. Self-hosted runner'a sadece özel repolardan iş
+# gider: herkese açık bir repo bu workflow'u çağırırsa iş GitHub-hosted runner'da hata verip biter.
+#
+# Araçlar sabit sürüm ve sha256 ile indirilir. Trivy'nin ikilisi seçilirken release imzası da doğrulandı
+# (cosign verify-blob, aquasecurity/trivy release workflow'unun kimliği); trivy-action/setup-trivy kullanılmaz
+# (CVE-2026-33634). Sürüm yükseltirken checksum release'teki *checksums.txt'den alınır.
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: "İmaj adı <uygulama>/<bileşen> (ör. hello/web). Registry öneki eklenir"
+        type: string
+        required: true
+      context:
+        description: "Build bağlamı (repo köküne göre)"
+        type: string
+        default: "."
+      dockerfile:
+        description: "Dockerfile yolu (repo köküne göre). Boşsa <context>/Dockerfile"
+        type: string
+        default: ""
+      target:
+        description: "İmajın Dockerfile aşaması (boşsa son aşama)"
+        type: string
+        default: ""
+      platform:
+        description: "Tek platform (BuildKit yerel mimaride çalışır, emülasyon yok)"
+        type: string
+        default: linux/amd64
+      build-args:
+        description: "Satır başına bir KEY=VALUE (sır koyma: imaj geçmişinde görünür)"
+        type: string
+        default: ""
+      test-command:
+        description: "Build'den önce runner'da çalışan komut (bash, repo kökünde). Runner'da Docker yok"
+        type: string
+        default: ""
+      test-target:
+        description: "Build'den önce BuildKit'te çalıştırılan Dockerfile aşaması (ör. test). Çıktısı atılır"
+        type: string
+        default: ""
+      trivy-severity:
+        description: "Düzeltmesi olan bu seviyedeki açıklar etiketlemeyi durdurur (virgüllü: CRITICAL ya da HIGH,CRITICAL)"
+        type: string
+        default: CRITICAL
+      push:
+        description: "false: hiç yayımlama (sadece test + build). true olsa da sadece varsayılan dalda yayımlanır"
+        type: boolean
+        default: true
+      timeout-minutes:
+        description: "İşin süre sınırı"
+        type: number
+        default: 60
+    outputs:
+      image:
+        description: "Registry'li imaj adı (ör. cr.catcore.dev/hello/web); yayımlanmadıysa boş"
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: "Etiketlenen manifest digest'i (sha256:…); yayımlanmadıysa boş"
+        value: ${{ jobs.build.outputs.digest }}
+      tag:
+        description: "sha-<12>; yayımlanmadıysa boş"
+        value: ${{ jobs.build.outputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  # github bağlamı çağıranındır. Herkese açık repoların işi self-hosted runner'a hiç gönderilmez.
+  public-repo:
+    if: ${{ github.event.repository.private != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Reddet
+        run: |
+          echo "::error::build-image sadece CatCoreDevs-Ent'in özel repolarında çalışır (self-hosted runner)."
+          echo "::error::Etkinlik 'repository' bilgisi taşımıyorsa (ör. schedule) da çalışmaz: push, pull_request ya da workflow_dispatch kullan."
+          exit 1
+
+  build:
+    if: ${{ github.event.repository.private == true && github.repository_owner == 'CatCoreDevs-Ent' }}
+    runs-on: catcore-arc
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+      digest: ${{ steps.publish.outputs.digest }}
+      tag: ${{ steps.publish.outputs.tag }}
+    env:
+      COSIGN_VERSION: v3.1.4
+      COSIGN_SHA256: 424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+      TRIVY_VERSION: 0.76.1
+      TRIVY_SHA256: c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+      CRANE_VERSION: v0.22.1
+      CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      # Girdiler betiklere ortam değişkeniyle girer (ifade enjeksiyonu yok).
+      IMAGE: ${{ inputs.image }}
+      CONTEXT: ${{ inputs.context }}
+      DOCKERFILE: ${{ inputs.dockerfile }}
+      TARGET: ${{ inputs.target }}
+      PLATFORM: ${{ inputs.platform }}
+      BUILD_ARGS: ${{ inputs.build-args }}
+      TEST_COMMAND: ${{ inputs.test-command }}
+      TEST_TARGET: ${{ inputs.test-target }}
+      TRIVY_FAIL_ON: ${{ inputs.trivy-severity }}
+      PUSH_INPUT: ${{ inputs.push }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Girdiler ve runner ortamı
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ ^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$ ]] ||
+            { echo "::error::image '<uygulama>/<bileşen>' biçiminde olmalı (küçük harf): $IMAGE"; exit 1; }
+          [[ "$PLATFORM" =~ ^linux/[a-z0-9]+(/v[0-9])?$ ]] || { echo "::error::platform tek bir değer olmalı: $PLATFORM"; exit 1; }
+          [[ "$TRIVY_FAIL_ON" =~ ^(CRITICAL|HIGH,CRITICAL|CRITICAL,HIGH)$ ]] ||
+            { echo "::error::trivy-severity CRITICAL ya da HIGH,CRITICAL olmalı: $TRIVY_FAIL_ON"; exit 1; }
+          : "${CI_REGISTRY:?runner ortamında CI_REGISTRY yok}" "${BUILDX_BUILDER:?runner ortamında BUILDX_BUILDER yok}"
+
+          publish=false
+          if [[ "$PUSH_INPUT" == true && -n "$DEFAULT_BRANCH" && "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+            publish=true
+            # Kimlik dosyaları yerinde mi (içerikleri basılmaz).
+            test -s "${DOCKER_CONFIG:?}/config.json" || { echo "::error::Registry kimliği (DOCKER_CONFIG) yok"; exit 1; }
+            if ! test -s "${CI_COSIGN_KEY:?}" || ! test -s "${CI_COSIGN_PASSWORD_FILE:?}"; then
+              echo "::error::cosign anahtarı ya da parolası yok"; exit 1
+            fi
+          fi
+          dockerfile="${DOCKERFILE:-$CONTEXT/Dockerfile}"
+          ref="$CI_REGISTRY/$IMAGE"
+          {
+            echo "PUBLISH=$publish"
+            echo "DOCKERFILE=$dockerfile"
+            echo "REF=$ref"
+            echo "CACHE_REF=$CI_REGISTRY/cache/$IMAGE"
+            echo "TAG=sha-${GITHUB_SHA:0:12}"
+            echo "TOOLS=$RUNNER_TEMP/bin"
+            echo "TRIVY_CACHE_DIR=$RUNNER_TEMP/trivy"
+          } >>"$GITHUB_ENV"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+          echo "imaj=$ref etiket=sha-${GITHUB_SHA:0:12} yayım=$publish (ref=$GITHUB_REF, varsayılan dal=$DEFAULT_BRANCH)"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Runner ayrıcalıksız (sudo yok): araçlar iş klasörüne kurulur.
+      - name: Araçlar (sabit sürüm, sha256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOLS" "$RUNNER_TEMP/dl"
+          cd "$RUNNER_TEMP/dl"
+          get() { curl -fsSL --retry 3 -o "$1" "$2" && echo "$3  $1" | sha256sum -c --quiet -; }
+          get gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" "$GITLEAKS_SHA256"
+          tar -xzf gitleaks.tgz -C "$TOOLS" gitleaks
+          if [[ "$PUBLISH" == true ]]; then
+            get cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" "$COSIGN_SHA256"
+            install -m 0755 cosign "$TOOLS/cosign"
+            get trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" "$TRIVY_SHA256"
+            tar -xzf trivy.tgz -C "$TOOLS" trivy
+            get crane.tgz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" "$CRANE_SHA256"
+            tar -xzf crane.tgz -C "$TOOLS" crane
+          fi
+          rm -rf "$RUNNER_TEMP/dl"
+          ls "$TOOLS"
+
+      # Aynı commit için etiket zaten varsa (yeniden çalıştırma) yeniden build edilmez: etiket taşınmaz.
+      - name: Etiket zaten var mı
+        id: existing
+        if: env.PUBLISH == 'true'
+        run: |
+          set -euo pipefail
+          if digest="$(crane digest "$REF:$TAG" 2>/dev/null)"; then
+            echo "::notice::$REF:$TAG zaten var ($digest); build atlanıyor"
+            echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Sır taraması (gitleaks)
+        if: steps.existing.outputs.digest == ''
+        run: gitleaks dir . --redact --no-banner --exit-code 1
+
+      - name: Test (runner)
+        if: steps.existing.outputs.digest == '' && inputs.test-command != ''
+        run: bash -euo pipefail -c "$TEST_COMMAND"
+
+      - name: Test (BuildKit)
+        if: steps.existing.outputs.digest == '' && inputs.test-target != ''
+        run: |
+          set -euo pipefail
+          args=(--file "$DOCKERFILE" --platform "$PLATFORM" --target "$TEST_TARGET" --output type=cacheonly
+                --cache-from "type=registry,ref=$CACHE_REF")
+          while IFS= read -r a; do if [[ -n "$a" ]]; then args+=(--build-arg "$a"); fi; done <<<"$BUILD_ARGS"
+          docker buildx build "${args[@]}" "$CONTEXT"
+
+      # Push digest'le, etiketsiz: tarama ve imzadan önce hiçbir etiket (latest dahil) oluşmaz.
+      - name: Build ve etiketsiz push
+        id: build
+        if: steps.existing.outputs.digest == ''
+        run: |
+          set -euo pipefail
+          meta="$RUNNER_TEMP/build-meta.json"
+          args=(--file "$DOCKERFILE" --platform "$PLATFORM" --provenance=false --sbom=false
+                --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+                --label "org.opencontainers.image.revision=$GITHUB_SHA"
+                --cache-from "type=registry,ref=$CACHE_REF")
+          if [[ -n "$TARGET" ]]; then args+=(--target "$TARGET"); fi
+          while IFS= read -r a; do if [[ -n "$a" ]]; then args+=(--build-arg "$a"); fi; done <<<"$BUILD_ARGS"
+          if [[ "$PUBLISH" == true ]]; then
+            args+=(--metadata-file "$meta"
+                   --output "type=image,name=$REF,push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true"
+                   --cache-to "type=registry,ref=$CACHE_REF,mode=max,oci-mediatypes=true")
+          else
+            args+=(--output type=cacheonly)
+          fi
+          docker buildx build "${args[@]}" "$CONTEXT"
+          if [[ "$PUBLISH" == true ]]; then
+            digest="$(jq -r '."containerimage.digest" // empty' "$meta")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::build digest'i okunamadı"; exit 1; }
+            echo "digest=$digest" >>"$GITHUB_OUTPUT"
+            echo "push: $REF@$digest (etiketsiz)"
+          fi
+
+      # Tek tarama, rapor JSON'da (bütün paketler: SBOM bundan çıkar). Kapı ikinci çağrıda (önbellekten, saniyeler):
+      # sadece düzeltmesi olan (--ignore-unfixed) açıklar sayılır. İstisna: repo kökünde .trivyignore (gerekçeli).
+      - name: Trivy
+        if: steps.build.outputs.digest != ''
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ignore=()
+          for f in .trivyignore.yaml .trivyignore; do [[ -f "$f" ]] && { ignore=(--ignorefile "$f"); break; }; done
+          common=(--quiet --image-src remote --scanners vuln --timeout 15m "${ignore[@]}")
+          trivy image "${common[@]}" --list-all-pkgs --format json -o "$RUNNER_TEMP/trivy.json" "$REF@$DIGEST"
+          trivy convert --scanners vuln --format table --severity HIGH,CRITICAL "$RUNNER_TEMP/trivy.json"
+          trivy convert --format cyclonedx -o "$RUNNER_TEMP/sbom.cdx.json" "$RUNNER_TEMP/trivy.json"
+          {
+            echo "### Trivy: $IMAGE"
+            jq -r '[.Results[]?.Vulnerabilities[]?.Severity] | group_by(.) | map("\(.[0]): \(length)") | join(", ") | if . == "" then "açık yok" else . end' "$RUNNER_TEMP/trivy.json"
+          } >>"$GITHUB_STEP_SUMMARY"
+          if ! trivy image "${common[@]}" --skip-db-update --severity "$TRIVY_FAIL_ON" --ignore-unfixed \
+               --exit-code 1 --format table "$REF@$DIGEST"; then
+            echo "::error::$TRIVY_FAIL_ON seviyesinde düzeltmesi olan açık var: $REF@$DIGEST etiketlenmedi (imzalanmadı)"
+            echo "**Etiketlenmedi:** $TRIVY_FAIL_ON açık (düzeltmesi var). Taban imajı/bağımlılığı güncelle ya da gerekçeyle .trivyignore'a ekle." >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      # Anahtarlı imza, şeffaflık kaydı (Rekor) ve zaman damgası yok: tlog'suz signing config. cosign 3'te
+      # --tlog-upload=false kullanımdan kalktı ve signing config'le birlikte reddediliyor. İmza ve SBOM, OCI 1.1
+      # referrer'ı olarak (sigstore bundle) registry'de durur. Parola log'a düşmez (set -x yok, yazdırılmaz).
+      - name: cosign imza ve SBOM
+        if: steps.build.outputs.digest != ''
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign signing-config create --out "$RUNNER_TEMP/signing-config.json"
+          COSIGN_PASSWORD="$(cat "$CI_COSIGN_PASSWORD_FILE")"
+          export COSIGN_PASSWORD
+          sc=(--yes --key "$CI_COSIGN_KEY" --signing-config "$RUNNER_TEMP/signing-config.json")
+          cosign sign "${sc[@]}" "$REF@$DIGEST"
+          cosign attest "${sc[@]}" --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" "$REF@$DIGEST"
+          cosign public-key --key "$CI_COSIGN_KEY" >"$RUNNER_TEMP/cosign.pub"
+          unset COSIGN_PASSWORD
+          # Kendi kendine doğrulama (aynı anahtar çiftinin açık anahtarıyla; tlog yok).
+          v=(--key "$RUNNER_TEMP/cosign.pub" --insecure-ignore-tlog=true)
+          cosign verify "${v[@]}" "$REF@$DIGEST" >/dev/null
+          cosign verify-attestation "${v[@]}" --type cyclonedx "$REF@$DIGEST" >/dev/null
+          echo "imza ve SBOM doğrulandı; açık anahtar sha256: $(sha256sum <"$RUNNER_TEMP/cosign.pub" | cut -d' ' -f1)"
+
+      - name: Etiket
+        id: publish
+        if: env.PUBLISH == 'true'
+        env:
+          EXISTING: ${{ steps.existing.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$EXISTING" ]]; then
+            digest="$EXISTING"
+          else
+            digest="$DIGEST"
+            crane tag "$REF@$digest" "$TAG"
+            [[ "$(crane digest "$REF:$TAG")" == "$digest" ]] || { echo "::error::etiket başka digest'i gösteriyor"; exit 1; }
+          fi
+          {
+            echo "image=$REF"
+            echo "digest=$digest"
+            echo "tag=$TAG"
+          } >>"$GITHUB_OUTPUT"
+          echo "### $REF:$TAG" >>"$GITHUB_STEP_SUMMARY"
+          echo "\`$REF@$digest\` (imzalı, SBOM'lu)" >>"$GITHUB_STEP_SUMMARY"

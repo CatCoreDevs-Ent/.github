@@ -1,0 +1,4 @@
+# actionlint: org'un self-hosted runner etiketleri (ARC scale set adı = runs-on etiketi).
+self-hosted-runner:
+  labels:
+    - catcore-arc
