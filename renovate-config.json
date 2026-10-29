@@ -64,7 +64,7 @@
         "yannh/kubeconform",
         "kyverno/kyverno",
         "sigstore/cosign",
-        "aquasecurity/trivy",
+        "aquasec/trivy",
         "google/go-containerregistry",
         "gitleaks/gitleaks"
       ],
@@ -89,11 +89,19 @@
       "description": "CI'da checksum'la indirilen araçlar (<ARAÇ>_VERSION; v öneki dosyada olsa da olmasa da korunur).",
       "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": [
-        "(?<tool>HELM|KUBECONFORM|KYVERNO|COSIGN|TRIVY|CRANE|GITLEAKS)_VERSION: \"?v?(?<currentValue>\\d[^\\s\"]*)\"?"
+        "(?<tool>HELM|KUBECONFORM|KYVERNO|COSIGN|CRANE|GITLEAKS)_VERSION: \"?v?(?<currentValue>\\d[^\\s\"]*)\"?"
       ],
-      "depNameTemplate": "{{#if (equals tool 'HELM')}}helm/helm{{/if}}{{#if (equals tool 'KUBECONFORM')}}yannh/kubeconform{{/if}}{{#if (equals tool 'KYVERNO')}}kyverno/kyverno{{/if}}{{#if (equals tool 'COSIGN')}}sigstore/cosign{{/if}}{{#if (equals tool 'TRIVY')}}aquasecurity/trivy{{/if}}{{#if (equals tool 'CRANE')}}google/go-containerregistry{{/if}}{{#if (equals tool 'GITLEAKS')}}gitleaks/gitleaks{{/if}}",
+      "depNameTemplate": "{{#if (equals tool 'HELM')}}helm/helm{{/if}}{{#if (equals tool 'KUBECONFORM')}}yannh/kubeconform{{/if}}{{#if (equals tool 'KYVERNO')}}kyverno/kyverno{{/if}}{{#if (equals tool 'COSIGN')}}sigstore/cosign{{/if}}{{#if (equals tool 'CRANE')}}google/go-containerregistry{{/if}}{{#if (equals tool 'GITLEAKS')}}gitleaks/gitleaks{{/if}}",
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Trivy (TRIVY_VERSION). Sürüm Docker Hub'daki aynı numaralı imajdan okunur: aquasecurity org'unun IP izin listesi App token'ıyla GitHub sorgusunu reddediyor.",
+      "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": ["TRIVY_VERSION: \"?v?(?<currentValue>\\d[^\\s\"]*)\"?"],
+      "depNameTemplate": "aquasec/trivy",
+      "datasourceTemplate": "docker"
     }
   ]
 }
