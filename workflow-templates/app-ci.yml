@@ -36,7 +36,7 @@ jobs:
           - component: web
             context: .
             dockerfile: Dockerfile
-    uses: CatCoreDevs-Ent/.github/.github/workflows/build-image.yml@c457afd1367b3b5da12a8b521f67373b63195fba # main
+    uses: CatCoreDevs-Ent/.github/.github/workflows/build-image.yml@c457afd1367b3b5da12a8b521f67373b63195fba # v1.0.0
     with:
       image: UYGULAMA/${{ matrix.component }}
       context: ${{ matrix.context }}
