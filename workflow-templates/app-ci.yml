@@ -1,0 +1,46 @@
+# Uygulama CI'ı (CatCoreDevs-Ent şablonu). Yalnızca ÖZEL repolar için: işler org'un self-hosted runner'larında
+# (catcore-arc) çalışır, herkese açık repodan reddedilir.
+#
+# main'e push: test → imaj → Zot'ta etiketsiz push → Trivy → cosign imza + SBOM → etiket sha-<12>.
+# Kargo yalnızca sha-* etiketlerini görür ve staging'e kendisi terfi ettirir. PR: sadece test + build (yayım yok).
+#
+# Doldurulacaklar:
+#   image        UYGULAMA yerine uygulamanın adı: <uygulama>/<bileşen> (ör. hello/web); registry'de cr.catcore.dev/<uygulama>/<bileşen> olur.
+#   test-target  Dockerfile'daki test aşaması (BuildKit'te çalışır, runner'da araç kurmak gerekmez) ya da
+#   test-command runner'da çalışan komut (Docker yok; Docker/services isteyen testler GitHub-hosted'da ayrı iş).
+#   Çok bileşenli repo: aşağıdaki matrix'e bileşen ekle (her biri kendi Dockerfile'ı ve context'iyle).
+#
+# build-image.yml'i commit SHA'sıyla sabitle (Renovate günceller); etiket yorumda.
+name: ci
+
+on:
+  push:
+    branches: [$default-branch]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # PR'da eski çalıştırma iptal edilir; main'de her commit'in imajı tamamlanır.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: web
+            context: .
+            dockerfile: Dockerfile
+    uses: CatCoreDevs-Ent/.github/.github/workflows/build-image.yml@53a209d1ba40101da649c1e45f5d2974a92ad674 # main
+    with:
+      image: UYGULAMA/${{ matrix.component }}
+      context: ${{ matrix.context }}
+      dockerfile: ${{ matrix.dockerfile }}
+      test-target: test
+      build-args: |
+        VERSION=${{ github.sha }}

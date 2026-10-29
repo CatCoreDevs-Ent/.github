@@ -1,0 +1,6 @@
+{
+  "name": "CatCore uygulama CI'ı",
+  "description": "Test, imaj (uzak BuildKit), Trivy, cosign imza + SBOM, sha-<12> etiketi; cr.catcore.dev. Sadece özel repolar.",
+  "categories": ["Containers", "Deployment"],
+  "filePatterns": ["Dockerfile$"]
+}
