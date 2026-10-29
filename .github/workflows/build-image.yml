@@ -277,13 +277,14 @@ jobs:
           cosign signing-config create --out "$RUNNER_TEMP/signing-config.json"
           COSIGN_PASSWORD="$(cat "$CI_COSIGN_PASSWORD_FILE")"
           export COSIGN_PASSWORD
-          sc=(--yes --key "$CI_COSIGN_KEY" --signing-config "$RUNNER_TEMP/signing-config.json")
+          # cosign'ın varsayılan süresi 3 dk; registry'ye manifest yazmak (referrer) yavaş olabiliyor.
+          sc=(--yes --timeout 15m --key "$CI_COSIGN_KEY" --signing-config "$RUNNER_TEMP/signing-config.json")
           cosign sign "${sc[@]}" "$REF@$DIGEST"
           cosign attest "${sc[@]}" --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" "$REF@$DIGEST"
           cosign public-key --key "$CI_COSIGN_KEY" >"$RUNNER_TEMP/cosign.pub"
           unset COSIGN_PASSWORD
           # Kendi kendine doğrulama (aynı anahtar çiftinin açık anahtarıyla; tlog yok).
-          v=(--key "$RUNNER_TEMP/cosign.pub" --insecure-ignore-tlog=true)
+          v=(--timeout 15m --key "$RUNNER_TEMP/cosign.pub" --insecure-ignore-tlog=true)
           cosign verify "${v[@]}" "$REF@$DIGEST" >/dev/null
           cosign verify-attestation "${v[@]}" --type cyclonedx "$REF@$DIGEST" >/dev/null
           echo "imza ve SBOM doğrulandı; açık anahtar sha256: $(sha256sum <"$RUNNER_TEMP/cosign.pub" | cut -d' ' -f1)"
