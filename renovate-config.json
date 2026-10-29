@@ -1,0 +1,99 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "CatCoreDevs-Ent ortak Renovate ayarları. Kullanım: \"extends\": [\"local>CatCoreDevs-Ent/.github:renovate-config\"]. Renovate self-host (infra reposundaki renovate.yml, org'un ARC runner'ları).",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "Europe/Istanbul",
+  "schedule": ["* 6-17 * * 1"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 0,
+  "minimumReleaseAge": "3 days",
+  "labels": ["dependencies"],
+  "automerge": false,
+  "vulnerabilityAlerts": {
+    "labels": ["dependencies", "security"]
+  },
+  "packageRules": [
+    {
+      "description": "Majör sürümler ayrı PR, asla otomatik birleşmez.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "major"]
+    },
+    {
+      "description": "Docker Hub dışındaki registry'ler (ghcr.io vb.) yayın zamanı vermez: zamanı bilinmeyen imaj güncellemesi minimumReleaseAge'i beklemeden gelir (yoksa hiç gelmez). Zamanı bilinenlerde 3 gün geçerli.",
+      "matchDatasources": ["docker"],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
+    },
+    {
+      "description": "Dockerfile taban imajları digest'e sabitlenir (etiket yorum gibi okunur, digest değişince PR gelir).",
+      "matchManagers": ["dockerfile"],
+      "pinDigests": true
+    },
+    {
+      "description": "Action'ların majör olmayan güncellemeleri ve digest'leri tek PR'da.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin", "pinDigest"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "OpenTofu kullanılıyor: provider'lar OpenTofu registry'sinden (lock dosyalarındaki adres de bu).",
+      "matchDatasources": ["terraform-provider"],
+      "registryUrls": ["https://registry.opentofu.org"]
+    },
+    {
+      "description": "required_version Terraform CLI'ı (hashicorp/terraform) sanılır; OpenTofu'da anlamsız.",
+      "matchManagers": ["terraform"],
+      "matchDepTypes": ["required_version"],
+      "enabled": false
+    },
+    {
+      "description": "OpenTofu provider'larının majör olmayan güncellemeleri tek PR'da.",
+      "matchDatasources": ["terraform-provider"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "OpenTofu provider'ları",
+      "groupSlug": "opentofu-providerlari"
+    },
+    {
+      "description": "Checksum'la indirilen CI araçları: Renovate sha256'yı güncelleyemez. PR sadece Dependency Dashboard'dan onaylanınca açılır; açan kişi aynı PR'da <ARAÇ>_SHA256'yı release'in checksum dosyasından günceller.",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": [
+        "helm/helm",
+        "yannh/kubeconform",
+        "kyverno/kyverno",
+        "sigstore/cosign",
+        "aquasecurity/trivy",
+        "google/go-containerregistry",
+        "gitleaks/gitleaks"
+      ],
+      "dependencyDashboardApproval": true,
+      "prBodyNotes": [
+        "⚠️ Bu araç checksum'la indiriliyor: aynı PR'da `*_SHA256` değerini release'in checksum dosyasından güncelleyin, yoksa iş checksum adımında düşer."
+      ]
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "CI'da indirilen talosctl (TALOS_VERSION).",
+      "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": ["TALOS_VERSION: \"?v(?<currentValue>\\d[^\\s\"]*)\"?"],
+      "depNameTemplate": "siderolabs/talos",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "CI'da checksum'la indirilen araçlar (<ARAÇ>_VERSION; v öneki dosyada olsa da olmasa da korunur).",
+      "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "(?<tool>HELM|KUBECONFORM|KYVERNO|COSIGN|TRIVY|CRANE|GITLEAKS)_VERSION: \"?v?(?<currentValue>\\d[^\\s\"]*)\"?"
+      ],
+      "depNameTemplate": "{{#if (equals tool 'HELM')}}helm/helm{{/if}}{{#if (equals tool 'KUBECONFORM')}}yannh/kubeconform{{/if}}{{#if (equals tool 'KYVERNO')}}kyverno/kyverno{{/if}}{{#if (equals tool 'COSIGN')}}sigstore/cosign{{/if}}{{#if (equals tool 'TRIVY')}}aquasecurity/trivy{{/if}}{{#if (equals tool 'CRANE')}}google/go-containerregistry{{/if}}{{#if (equals tool 'GITLEAKS')}}gitleaks/gitleaks{{/if}}",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
+  ]
+}
