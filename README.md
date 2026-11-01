@@ -33,3 +33,35 @@ gitleaks → test (runner komutu ya da Dockerfile'ın test aşaması) → build 
 | `timeout-minutes` | `60` | |
 
 Çıktılar: `image`, `digest`, `tag`.
+
+## Score render hattı: `.github/workflows/score-render.yml`
+
+Reusable workflow. Uygulamanın Score dosyalarını (`score.yaml`, `<bileşen>.score.yaml`) platformun Score paketiyle
+(`cr.catcore.dev/score/k8s:<sürüm>`: infra'daki `kubernetes/score/k8s`, provisioner'lar + patch şablonu + `render.py`)
+staging ve production için Kubernetes manifestlerine çevirir. Şablondaki `render` işi `needs: image` ile çağırır.
+
+```
+Score paketi (crane export) → imaj digest'leri (cr.catcore.dev/<app>/<bileşen>:sha-<12>) → render.py (staging, production)
+  → cr.catcore.dev/<app>/rendered'a ETİKETSİZ push (digest) → cosign imza → etiket sha-<12>
+```
+
+- Paket tek katmanlı (FROM scratch): `staging/manifests.yaml`, `production/manifests.yaml`. Kargo `sha-*` etiketini
+  görür ve katmanı deploy reposunun `rendered/<app>/<ortam>`'ına yazar.
+- `metadata.name`: `<app>-<bileşen>`; `image: .` olan iş yükünün imajı aynı commit'in `sha-<12>` etiketinin digest'i.
+  Etiket yoksa (imaj işi bitmemiş ya da düşmüş) render yayımlanmaz.
+- Ortam override'ları (`<dosya>.staging.yaml`, `<dosya>.production.yaml`) `render.py` tarafından kendiliğinden uygulanır;
+  `score-files`'a yazılmaz.
+- Sadece varsayılan dala push'ta ve elle çalıştırmada yayımlar; PR'da ve diğer dallarda örnek digest'lerle render
+  edilir (Score dosyaları ve provisioner'lar yine denetlenir, özet iş sayfasında). Aynı commit'in etiketi varsa atlanır.
+- Araçlar (crane, cosign, score-k8s, PyYAML) sabit sürüm ve sha256 ile; PyYAML'ın saf Python modülü kaynak paketten
+  açılır (runner imajında pip yok).
+
+| Girdi | Varsayılan | |
+|---|---|---|
+| `app` | (zorunlu) | namespace `<app>-<ortam>` |
+| `score-files` | `score.yaml` | satır başına bir yol (repo köküne göre) |
+| `package` | `cr.catcore.dev/score/k8s:0.1.0` | Score paketinin sürümü ya da digest'i |
+| `push` | `true` | `false`: hiç yayımlama |
+| `timeout-minutes` | `20` | |
+
+Çıktılar: `image` (`cr.catcore.dev/<app>/rendered`), `digest`, `tag` (yayımlanmadıysa boş).
