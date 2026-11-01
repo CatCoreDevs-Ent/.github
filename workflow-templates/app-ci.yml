@@ -53,7 +53,7 @@ jobs:
   # İmajlardan sonra: render aynı commit'in imaj etiketlerini (sha-<12>) digest'e çevirir.
   render:
     needs: image
-    uses: CatCoreDevs-Ent/.github/.github/workflows/score-render.yml@d82d89b4ef2ec41e0e1f265fc40a2035ae583462 # v1.1.0
+    uses: CatCoreDevs-Ent/.github/.github/workflows/score-render.yml@2e799a8cece770e59b268a773e47018068216684 # v1.2.0
     with:
       app: UYGULAMA
       score-files: |
