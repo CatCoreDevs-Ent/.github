@@ -1,0 +1,373 @@
+name: score-render
+
+# Org'un ortak Score render hattı (reusable). Uygulama repoları imaj işinden sonra çağırır:
+#
+#   jobs:
+#     render:
+#       needs: image
+#       uses: CatCoreDevs-Ent/.github/.github/workflows/score-render.yml@<commit-sha> # v1.1.0
+#       with:
+#         app: hello
+#         score-files: |
+#           score.yaml
+#
+# Akış: Score paketi (cr.catcore.dev/score/k8s:<sürüm>, infra'nın kubernetes/score/k8s'i) → imaj digest'leri
+#   → render.py (staging ve production; ortam override'ları <dosya>.<ortam>.yaml) → yayımda: rendered paketi Zot'a
+#   ETİKETSİZ push (digest) → cosign imza → etiket sha-<commit'in ilk 12 hanesi>
+# Paket: cr.catcore.dev/<app>/rendered, tek katman: staging/manifests.yaml ve production/manifests.yaml. Kargo
+# sha-* etiketini görür, katmanı deploy reposunun rendered/<app>/<ortam>'ına yazar. Etiket en son konur: imzasız
+# paket hiçbir ortama gidemez.
+#
+# İmajlar: Score dosyasının metadata.name'i <app>-<bileşen>; `image: .` olan iş yükünün imajı aynı commit'in
+# cr.catcore.dev/<app>/<bileşen>:sha-<12> etiketinin digest'idir (build-image.yml'in çıktısı). Etiket yoksa iş düşer.
+# Yayım yoksa (PR, diğer dallar, push: false) örnek digest'lerle render edilir: Score dosyaları yine denetlenir.
+#
+# Sadece varsayılan dala push'ta ve elle çalıştırmada yayımlar. Çalıştığı yer, kimlikler ve herkese açık repo reddi
+# build-image.yml'deki gibi (catcore-arc; DOCKER_CONFIG, CI_COSIGN_KEY, CI_COSIGN_PASSWORD_FILE, BUILDX_BUILDER,
+# CI_REGISTRY runner'ın ortamından).
+#
+# Araçlar sabit sürüm ve sha256 ile indirilir. Runner imajında python3 var, PyYAML ve pip yok (sudo da yok): PyYAML'ın
+# kaynak paketindeki saf Python modülü (lib/yaml) PYTHONPATH'e açılır, Python sürümünden bağımsızdır (libyaml'sız
+# yavaş yol; Score dosyaları için fark etmez). Sürüm yükseltirken checksum PyPI'daki sdist'ten, score-k8s'inki
+# release'in checksums.txt'sinden alınır.
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: "Uygulama adı (namespace <app>-<ortam>, imajlar cr.catcore.dev/<app>/<bileşen>)"
+        type: string
+        required: true
+      score-files:
+        description: "Satır başına bir Score dosyası (repo köküne göre). Ortam override'ları (<dosya>.<ortam>.yaml) yazılmaz, kendiliğinden bulunur"
+        type: string
+        default: score.yaml
+      package:
+        description: "Score paketi (provisioner'lar, patch şablonu, render.py); sürüm infra'nın kubernetes/score/CHANGELOG.md'sinde"
+        type: string
+        default: cr.catcore.dev/score/k8s:0.1.0
+      push:
+        description: "false: hiç yayımlama (sadece render). true olsa da sadece varsayılan dalda yayımlanır"
+        type: boolean
+        default: true
+      timeout-minutes:
+        description: "İşin süre sınırı"
+        type: number
+        default: 20
+    outputs:
+      image:
+        description: "Rendered paketin adı (ör. cr.catcore.dev/hello/rendered)"
+        value: ${{ jobs.render.outputs.image }}
+      digest:
+        description: "Etiketlenen paketin digest'i (sha256:…); yayımlanmadıysa boş"
+        value: ${{ jobs.render.outputs.digest }}
+      tag:
+        description: "sha-<12>; yayımlanmadıysa boş"
+        value: ${{ jobs.render.outputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  # github bağlamı çağıranındır. Herkese açık repoların işi self-hosted runner'a hiç gönderilmez.
+  public-repo:
+    if: ${{ github.event.repository.private != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Reddet
+        run: |
+          echo "::error::score-render sadece CatCoreDevs-Ent'in özel repolarında çalışır (self-hosted runner)."
+          echo "::error::Etkinlik 'repository' bilgisi taşımıyorsa (ör. schedule) da çalışmaz: push, pull_request ya da workflow_dispatch kullan."
+          exit 1
+
+  render:
+    if: ${{ github.event.repository.private == true && github.repository_owner == 'CatCoreDevs-Ent' }}
+    runs-on: catcore-arc
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      image: ${{ steps.inputs.outputs.image }}
+      digest: ${{ steps.publish.outputs.digest }}
+      tag: ${{ steps.publish.outputs.tag }}
+    env:
+      # build-image.yml ile aynı sürümler ve checksum'lar.
+      COSIGN_VERSION: v3.1.4
+      COSIGN_SHA256: 424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+      CRANE_VERSION: v0.22.1
+      CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+      # infra'nın scripts/validate-score.sh'ıyla aynı sürüm (render'lar orada aynı score-k8s ile denetlenir).
+      SCORE_K8S_VERSION: 0.22.0
+      SCORE_K8S_SHA256: d32f190d6278943d85cfecfacdee31146ff56b5fa148d6fe2850da1fa237d2f0
+      PYYAML_VERSION: 6.0.3
+      PYYAML_SHA256: d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f
+      # Girdiler betiklere ortam değişkeniyle girer (ifade enjeksiyonu yok).
+      APP: ${{ inputs.app }}
+      SCORE_FILES: ${{ inputs.score-files }}
+      PACKAGE: ${{ inputs.package }}
+      PUSH_INPUT: ${{ inputs.push }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Girdiler ve runner ortamı
+        id: inputs
+        run: |
+          set -euo pipefail
+          # render.py'nin ve namespace'in kuralı (DNS etiketi).
+          [[ "$APP" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo "::error::app küçük harfli bir DNS adı olmalı: $APP"; exit 1; }
+          [[ "$PACKAGE" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+(:[A-Za-z0-9._-]+|@sha256:[0-9a-f]{64})$ ]] ||
+            { echo "::error::package <registry>/<ad>:<sürüm> ya da @sha256:… olmalı: $PACKAGE"; exit 1; }
+          : "${CI_REGISTRY:?runner ortamında CI_REGISTRY yok}"
+
+          publish=false
+          if [[ "$PUSH_INPUT" == true && -n "$DEFAULT_BRANCH" && "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+            publish=true
+            : "${BUILDX_BUILDER:?runner ortamında BUILDX_BUILDER yok}"
+            # Kimlik dosyaları yerinde mi (içerikleri basılmaz).
+            test -s "${DOCKER_CONFIG:?}/config.json" || { echo "::error::Registry kimliği (DOCKER_CONFIG) yok"; exit 1; }
+            if ! test -s "${CI_COSIGN_KEY:?}" || ! test -s "${CI_COSIGN_PASSWORD_FILE:?}"; then
+              echo "::error::cosign anahtarı ya da parolası yok"; exit 1
+            fi
+          fi
+          ref="$CI_REGISTRY/$APP/rendered"
+          {
+            echo "PUBLISH=$publish"
+            echo "REF=$ref"
+            echo "TAG=sha-${GITHUB_SHA:0:12}"
+            echo "TOOLS=$RUNNER_TEMP/bin"
+            echo "PKG=$RUNNER_TEMP/score-package"
+            echo "OUT=$RUNNER_TEMP/rendered"
+            echo "SCORE_K8S=$RUNNER_TEMP/bin/score-k8s"
+            echo "PYTHONPATH=$RUNNER_TEMP/pylib"
+          } >>"$GITHUB_ENV"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+          echo "image=$ref" >>"$GITHUB_OUTPUT"
+          echo "paket=$ref etiket=sha-${GITHUB_SHA:0:12} yayım=$publish (ref=$GITHUB_REF, varsayılan dal=$DEFAULT_BRANCH)"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Runner ayrıcalıksız (sudo yok): araçlar iş klasörüne kurulur.
+      - name: Araçlar (sabit sürüm, sha256)
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOLS" "$PYTHONPATH" "$RUNNER_TEMP/dl"
+          cd "$RUNNER_TEMP/dl"
+          get() { curl -fsSL --retry 3 -o "$1" "$2" && echo "$3  $1" | sha256sum -c --quiet -; }
+          get crane.tgz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" "$CRANE_SHA256"
+          tar -xzf crane.tgz -C "$TOOLS" crane
+          get score-k8s.tgz "https://github.com/score-spec/score-k8s/releases/download/${SCORE_K8S_VERSION}/score-k8s_${SCORE_K8S_VERSION}_linux_amd64.tar.gz" "$SCORE_K8S_SHA256"
+          tar -xzf score-k8s.tgz -C "$TOOLS" score-k8s
+          # PyPI'ın sdist adresi dosya adından türetilir (files.pythonhosted.org/packages/source/…).
+          get pyyaml.tgz "https://files.pythonhosted.org/packages/source/p/pyyaml/pyyaml-${PYYAML_VERSION}.tar.gz" "$PYYAML_SHA256"
+          tar -xzf pyyaml.tgz -C "$PYTHONPATH" --strip-components=2 "pyyaml-${PYYAML_VERSION}/lib/yaml"
+          if [[ "$PUBLISH" == true ]]; then
+            get cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" "$COSIGN_SHA256"
+            install -m 0755 cosign "$TOOLS/cosign"
+          fi
+          rm -rf "$RUNNER_TEMP/dl"
+          ls "$TOOLS"
+          score-k8s --version | head -1
+          python3 -P -s -c 'import sys, yaml; print(f"python {sys.version.split()[0]}, PyYAML {yaml.__version__} ({yaml.__file__})")'
+
+      # Aynı commit için etiket zaten varsa (yeniden çalıştırma) yeniden render edilmez: etiket taşınmaz.
+      - name: Etiket zaten var mı
+        id: existing
+        if: env.PUBLISH == 'true'
+        run: |
+          set -euo pipefail
+          if digest="$(crane digest "$REF:$TAG" 2>/dev/null)"; then
+            echo "::notice::$REF:$TAG zaten var ($digest); render atlanıyor"
+            echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          fi
+
+      # Paket tek katmanlı bir imaj (FROM scratch): içeriği provisioner'lar, patch şablonu, render.py ve VERSION.
+      - name: Score paketi
+        id: package
+        if: steps.existing.outputs.digest == ''
+        run: |
+          set -euo pipefail
+          if [[ "$PACKAGE" == *@* ]]; then repo="${PACKAGE%@*}"; else repo="${PACKAGE%:*}"; fi
+          digest="$(crane digest "$PACKAGE")" || { echo "::error::Score paketi bulunamadı: $PACKAGE"; exit 1; }
+          mkdir -p "$PKG"
+          crane export "$repo@$digest" - | tar -x -C "$PKG"
+          for f in catcore.provisioners.yaml catcore.patch.yaml render.py VERSION; do
+            test -s "$PKG/$f" || { echo "::error::Score paketinde $f yok: $PACKAGE"; exit 1; }
+          done
+          echo "ref=$repo@$digest" >>"$GITHUB_OUTPUT"
+          echo "Score paketi $(tr -d '[:space:]' <"$PKG/VERSION"): $repo@$digest"
+
+      # Dosya listesi ve iş yükleri. İmajı CI'ın ürettiği iş yükleri: herhangi bir ortamda (override uygulanmış)
+      # `image: .` olan container'ı bulunanlar. Ad kuralını render.py de denetler; burada imaj adı için gerekiyor.
+      - name: Score dosyaları
+        if: steps.existing.outputs.digest == ''
+        run: |
+          set -euo pipefail
+          python3 -P -s - "$APP" "$RUNNER_TEMP/score-files" "$RUNNER_TEMP/workloads" <<'PY'
+          import os, re, sys
+          import yaml
+
+          app, files_out, workloads_out = sys.argv[1:]
+          def fail(m):
+              print(f"::error::{m}")
+              sys.exit(1)
+          root = os.path.realpath(".")
+
+          def merge_patch(target, patch):  # render.py'deki gibi (RFC 7386)
+              if not isinstance(patch, dict):
+                  return patch
+              out = dict(target) if isinstance(target, dict) else {}
+              for k, v in patch.items():
+                  if v is None:
+                      out.pop(k, None)
+                  else:
+                      out[k] = merge_patch(out.get(k), v)
+              return out
+
+          files = [l.strip() for l in os.environ["SCORE_FILES"].splitlines() if l.strip()]
+          if not files:
+              fail("score-files boş")
+          workloads = {}
+          for f in files:
+              if os.path.isabs(f) or not os.path.realpath(f).startswith(root + os.sep):
+                  fail(f"{f}: repo içinde göreli bir yol olmalı")
+              if not os.path.isfile(f):
+                  fail(f"{f}: Score dosyası yok")
+              base, ext = os.path.splitext(f)
+              if re.search(r"\.(staging|production)$", base):
+                  fail(f"{f}: ortam override'ı score-files'a yazılmaz (ana dosyanın yanında kendiliğinden uygulanır)")
+              spec = yaml.safe_load(open(f))
+              if not isinstance(spec, dict):
+                  fail(f"{f}: Score dosyası değil")
+              name = str((spec.get("metadata") or {}).get("name", ""))
+              component = name[len(app) + 1:] if name.startswith(f"{app}-") else ""
+              if not re.fullmatch(r"[a-z0-9]+([._-][a-z0-9]+)*", component):
+                  fail(f"{f}: metadata.name {name!r} <app>-<bileşen> olmalı ({app}-…)")
+              if name in workloads:
+                  fail(f"{f}: {name} iki dosyada")
+              needs = False
+              for env in ("staging", "production"):
+                  merged = spec
+                  if os.path.exists(f"{base}.{env}{ext}"):
+                      merged = merge_patch(spec, yaml.safe_load(open(f"{base}.{env}{ext}")) or {})
+                  if not isinstance(merged, dict):
+                      fail(f"{base}.{env}{ext}: override bir map olmalı")
+                  needs |= any(isinstance(c, dict) and c.get("image") == "." for c in (merged.get("containers") or {}).values())
+              workloads[name] = (component, needs)
+              print(f"{f}: {name}" + (f" (imaj {app}/{component})" if needs else ""))
+          with open(files_out, "w") as out:
+              out.writelines(f"{f}\n" for f in files)
+          with open(workloads_out, "w") as out:
+              out.writelines(f"{n}\t{c}\n" for n, (c, needs) in sorted(workloads.items()) if needs)
+          PY
+
+      # Yayımda aynı commit'in imaj etiketleri (build-image.yml: imzalı, taranmış). Etiket yoksa render edilmez.
+      - name: İmaj digest'leri
+        if: steps.existing.outputs.digest == '' && env.PUBLISH == 'true'
+        run: |
+          set -euo pipefail
+          : >"$RUNNER_TEMP/images"
+          while IFS=$'\t' read -r name component; do
+            image="$CI_REGISTRY/$APP/$component"
+            if ! digest="$(crane digest "$image:$TAG")"; then
+              echo "::error::$image:$TAG yok: imaj işi (build-image) bu commit için bitmeli (needs: image)"
+              exit 1
+            fi
+            echo "$name=$image@$digest" | tee -a "$RUNNER_TEMP/images"
+          done <"$RUNNER_TEMP/workloads"
+
+      - name: Render
+        if: steps.existing.outputs.digest == ''
+        run: |
+          set -euo pipefail
+          mapfile -t files <"$RUNNER_TEMP/score-files"
+          args=(--package "$PKG" --app "$APP")
+          if [[ "$PUBLISH" == true ]]; then
+            while IFS= read -r i; do args+=(--image "$i"); done <"$RUNNER_TEMP/images"
+          else
+            args+=(--sample-images)
+          fi
+          for env in staging production; do
+            python3 -P -s "$PKG/render.py" "${args[@]}" --env "$env" --out "$OUT/$env/manifests.yaml" "${files[@]}"
+          done
+          python3 -P -s - "$OUT" <<'PY' >>"$GITHUB_STEP_SUMMARY"
+          import collections, os, sys
+          import yaml
+
+          print(f"### Score render: {os.environ['APP']}" + ("" if os.environ["PUBLISH"] == "true" else " (örnek imajlarla, yayım yok)"))
+          print("| Ortam | Kaynak | Türler |\n|---|---|---|")
+          for env in ("staging", "production"):
+              docs = [d for d in yaml.safe_load_all(open(os.path.join(sys.argv[1], env, "manifests.yaml"))) if d]
+              kinds = collections.Counter(d["kind"] for d in docs)
+              print(f"| {env} | {len(docs)} | " + ", ".join(f"{k} {n}" for k, n in sorted(kinds.items())) + " |")
+          PY
+
+      # Paket: FROM scratch + COPY, tek katman (Kargo ilk katmanı açar). Dockerfile bağlamın dışında: katmanda sadece
+      # staging/ ve production/ var. Push digest'le, etiketsiz: imzadan önce etiket oluşmaz.
+      - name: Paketle ve etiketsiz push
+        id: build
+        if: steps.existing.outputs.digest == '' && env.PUBLISH == 'true'
+        env:
+          PACKAGE_REF: ${{ steps.package.outputs.ref }}
+        run: |
+          set -euo pipefail
+          printf 'FROM scratch\nCOPY . /\n' >"$RUNNER_TEMP/Dockerfile.rendered"
+          meta="$RUNNER_TEMP/build-meta.json"
+          docker buildx build "$OUT" --file "$RUNNER_TEMP/Dockerfile.rendered" --platform linux/amd64 \
+            --provenance=false --sbom=false \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "dev.catcore.score.package=$PACKAGE_REF" \
+            --metadata-file "$meta" \
+            --output "type=image,name=$REF,push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true"
+          digest="$(jq -r '."containerimage.digest" // empty' "$meta")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::paket digest'i okunamadı"; exit 1; }
+
+          # Kargo'nun okuyacağı gibi mi: tek katman, içinde sadece iki ortamın manifestleri, içerik render'ın aynısı.
+          layers="$(crane manifest "$REF@$digest" | jq '.layers | length')"
+          [[ "$layers" == 1 ]] || { echo "::error::pakette $layers katman var (1 olmalı)"; exit 1; }
+          check="$RUNNER_TEMP/rendered-check"
+          mkdir -p "$check"
+          crane export "$REF@$digest" - | tar -x -C "$check"
+          diff -r "$OUT" "$check" || { echo "::error::paketin içeriği render'dan farklı"; exit 1; }
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          echo "push: $REF@$digest (etiketsiz)"
+
+      # build-image.yml'deki gibi: anahtarlı imza, tlog'suz signing config (Rekor ve zaman damgası yok), imza OCI 1.1
+      # referrer'ı. SBOM yok (paket yazılım değil, manifest). Parola log'a düşmez.
+      - name: cosign imza
+        if: steps.build.outputs.digest != ''
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign signing-config create --out "$RUNNER_TEMP/signing-config.json"
+          COSIGN_PASSWORD="$(cat "$CI_COSIGN_PASSWORD_FILE")"
+          export COSIGN_PASSWORD
+          cosign sign --yes --timeout 15m --key "$CI_COSIGN_KEY" --signing-config "$RUNNER_TEMP/signing-config.json" \
+            "$REF@$DIGEST"
+          cosign public-key --key "$CI_COSIGN_KEY" >"$RUNNER_TEMP/cosign.pub"
+          unset COSIGN_PASSWORD
+          cosign verify --timeout 15m --key "$RUNNER_TEMP/cosign.pub" --insecure-ignore-tlog=true "$REF@$DIGEST" >/dev/null
+          echo "imza doğrulandı; açık anahtar sha256: $(sha256sum <"$RUNNER_TEMP/cosign.pub" | cut -d' ' -f1)"
+
+      - name: Etiket
+        id: publish
+        if: env.PUBLISH == 'true'
+        env:
+          EXISTING: ${{ steps.existing.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$EXISTING" ]]; then
+            digest="$EXISTING"
+          else
+            digest="$DIGEST"
+            crane tag "$REF@$digest" "$TAG"
+            [[ "$(crane digest "$REF:$TAG")" == "$digest" ]] || { echo "::error::etiket başka digest'i gösteriyor"; exit 1; }
+          fi
+          {
+            echo "digest=$digest"
+            echo "tag=$TAG"
+          } >>"$GITHUB_OUTPUT"
+          echo "### $REF:$TAG" >>"$GITHUB_STEP_SUMMARY"
+          echo "\`$REF@$digest\` (imzalı)" >>"$GITHUB_STEP_SUMMARY"
