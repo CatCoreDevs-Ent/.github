@@ -49,6 +49,8 @@ Score paketi (crane export) → imaj digest'leri (cr.catcore.dev/<app>/<bileşen
   görür ve katmanı deploy reposunun `rendered/<app>/<ortam>`'ına yazar.
 - `metadata.name`: `<app>-<bileşen>`; `image: .` olan iş yükünün imajı aynı commit'in `sha-<12>` etiketinin digest'i.
   Etiket yoksa (imaj işi bitmemiş ya da düşmüş) render yayımlanmaz.
+  Sadece değişen bileşeni build eden repo, build edilmeyen bileşenin son etiketini `image-tags` ile verir
+  (ör. `route-osrm=sha-0011223344ff`); etiket yoksa, iş yükü bilinmiyorsa ya da biçim yanlışsa iş düşer.
 - Ortam override'ları (`<dosya>.staging.yaml`, `<dosya>.production.yaml`) `render.py` tarafından kendiliğinden uygulanır;
   `score-files`'a yazılmaz.
 - Sadece varsayılan dala push'ta ve elle çalıştırmada yayımlar; PR'da ve diğer dallarda örnek digest'lerle render
@@ -61,6 +63,7 @@ Score paketi (crane export) → imaj digest'leri (cr.catcore.dev/<app>/<bileşen
 | `app` | (zorunlu) | namespace `<app>-<ortam>` |
 | `score-files` | `score.yaml` | satır başına bir yol (repo köküne göre) |
 | `package` | `cr.catcore.dev/score/k8s:0.1.0` | Score paketinin sürümü ya da digest'i |
+| `image-tags` | | satır başına `<iş yükü>=sha-<12>`: bu commit'te build edilmeyen bileşen o etiketin digest'iyle |
 | `push` | `true` | `false`: hiç yayımlama |
 | `timeout-minutes` | `20` | |
 

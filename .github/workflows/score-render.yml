@@ -20,6 +20,8 @@ name: score-render
 #
 # İmajlar: Score dosyasının metadata.name'i <app>-<bileşen>; `image: .` olan iş yükünün imajı aynı commit'in
 # cr.catcore.dev/<app>/<bileşen>:sha-<12> etiketinin digest'idir (build-image.yml'in çıktısı). Etiket yoksa iş düşer.
+# Bu commit'te build edilmeyen bileşen (yalnız değişen bileşeni build eden repo) image-tags ile başka bir commit'in
+# sha-<12> etiketini kullanır (ör. route-osrm=sha-0011223344ff); hangi etiketin verileceği çağıranın işidir.
 # Yayım yoksa (PR, diğer dallar, push: false) örnek digest'lerle render edilir: Score dosyaları yine denetlenir.
 #
 # Sadece varsayılan dala push'ta ve elle çalıştırmada yayımlar. Çalıştığı yer, kimlikler ve herkese açık repo reddi
@@ -46,6 +48,10 @@ on:
         description: "Score paketi (provisioner'lar, patch şablonu, render.py); sürüm infra'nın kubernetes/score/CHANGELOG.md'sinde"
         type: string
         default: cr.catcore.dev/score/k8s:0.1.0
+      image-tags:
+        description: "Satır başına <iş yükü>=sha-<12> (ör. route-osrm=sha-0011223344ff): o iş yükünün imajı bu commit'in değil bu etiketin digest'i. Verilmeyenler sha-<bu commit>"
+        type: string
+        default: ""
       push:
         description: "false: hiç yayımlama (sadece render). true olsa da sadece varsayılan dalda yayımlanır"
         type: boolean
@@ -103,6 +109,7 @@ jobs:
       # Girdiler betiklere ortam değişkeniyle girer (ifade enjeksiyonu yok).
       APP: ${{ inputs.app }}
       SCORE_FILES: ${{ inputs.score-files }}
+      IMAGE_TAGS: ${{ inputs.image-tags }}
       PACKAGE: ${{ inputs.package }}
       PUSH_INPUT: ${{ inputs.push }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -198,6 +205,7 @@ jobs:
 
       # Dosya listesi ve iş yükleri. İmajı CI'ın ürettiği iş yükleri: herhangi bir ortamda (override uygulanmış)
       # `image: .` olan container'ı bulunanlar. Ad kuralını render.py de denetler; burada imaj adı için gerekiyor.
+      # image-tags burada denetlenir (PR'da da): biçim, iş yükü var mı, imajı CI'dan mı geliyor.
       - name: Score dosyaları
         if: steps.existing.outputs.digest == ''
         run: |
@@ -254,22 +262,46 @@ jobs:
                   needs |= any(isinstance(c, dict) and c.get("image") == "." for c in (merged.get("containers") or {}).values())
               workloads[name] = (component, needs)
               print(f"{f}: {name}" + (f" (imaj {app}/{component})" if needs else ""))
+          # Sadece build-image'ın koyduğu etiketler (sha-<12>: taranmış, imzalı digest).
+          tags = {}
+          for line in os.environ["IMAGE_TAGS"].splitlines():
+              item = line.strip()
+              if not item:
+                  continue
+              m = re.fullmatch(r"([a-z0-9-]+)=(sha-[0-9a-f]{12})", item)
+              if not m:
+                  fail(f"image-tags: {item!r} <iş yükü>=sha-<12> olmalı (ör. {app}-api=sha-0011223344ff)")
+              name, tag = m.groups()
+              if name not in workloads:
+                  fail(f"image-tags: {name} Score dosyalarında yok (iş yükleri: {', '.join(sorted(workloads))})")
+              if not workloads[name][1]:
+                  fail(f"image-tags: {name} imajını CI'dan almıyor (hiçbir container'da image: . yok)")
+              if name in tags:
+                  fail(f"image-tags: {name} iki kez verildi")
+              tags[name] = tag
+              print(f"{name}: imaj etiketi {tag} (image-tags)")
           with open(files_out, "w") as out:
               out.writelines(f"{f}\n" for f in files)
           with open(workloads_out, "w") as out:
-              out.writelines(f"{n}\t{c}\n" for n, (c, needs) in sorted(workloads.items()) if needs)
+              out.writelines(f"{n}\t{c}\t{tags.get(n, '')}\n" for n, (c, needs) in sorted(workloads.items()) if needs)
           PY
 
-      # Yayımda aynı commit'in imaj etiketleri (build-image.yml: imzalı, taranmış). Etiket yoksa render edilmez.
+      # Yayımda aynı commit'in imaj etiketleri (build-image.yml: imzalı, taranmış) ya da image-tags'teki etiket.
+      # Etiket yoksa render edilmez.
       - name: İmaj digest'leri
         if: steps.existing.outputs.digest == '' && env.PUBLISH == 'true'
         run: |
           set -euo pipefail
           : >"$RUNNER_TEMP/images"
-          while IFS=$'\t' read -r name component; do
+          while IFS=$'\t' read -r name component tag; do
             image="$CI_REGISTRY/$APP/$component"
-            if ! digest="$(crane digest "$image:$TAG")"; then
-              echo "::error::$image:$TAG yok: imaj işi (build-image) bu commit için bitmeli (needs: image)"
+            if [[ -n "$tag" ]]; then
+              if ! digest="$(crane digest "$image:$tag")"; then
+                echo "::error::$image:$tag yok (image-tags: $name=$tag): o commit'in imajı yayımlanmış olmalı"
+                exit 1
+              fi
+            elif ! digest="$(crane digest "$image:$TAG")"; then
+              echo "::error::$image:$TAG yok: imaj işi (build-image) bu commit için bitmeli (needs: image); bu commit'te build edilmeyen bileşen için image-tags"
               exit 1
             fi
             echo "$name=$image@$digest" | tee -a "$RUNNER_TEMP/images"
