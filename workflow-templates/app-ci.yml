@@ -1,21 +1,19 @@
 # Uygulama CI'ı (CatCoreDevs-Ent şablonu). Yalnızca ÖZEL repolar için: işler org'un self-hosted runner'larında
 # (catcore-arc) çalışır, herkese açık repodan reddedilir.
 #
-# main'e push: test → imaj → Zot'ta etiketsiz push → Trivy → cosign imza + SBOM → etiket sha-<12>.
-# Ardından Score render'ı: score.yaml → staging ve production manifestleri (imajlar bu commit'in digest'leri) →
-# cr.catcore.dev/<uygulama>/rendered:sha-<12> (imzalı). Kargo yalnızca sha-* etiketlerini görür, manifestleri deploy
-# reposuna yazar ve staging'e kendisi terfi ettirir. PR: sadece test + build + örnek imajlarla render (yayım yok).
+# main'e push: test → imaj → Zot'ta etiketsiz push → Trivy → cosign imza + SBOM → etiket sha-<12>. Kargo yalnızca
+# sha-* etiketlerini görür, digest'leri deploy reposuna (apps/<uygulama>/<ortam>, ortak Helm chart'ın değerleri) yazar
+# ve staging'e kendisi terfi ettirir. Bağımlılıklar (Postgres, Valkey, Kafka, S3…) deploy reposundaki değerlerde:
+# infra docs/yeni-uygulama.md. PR: sadece test + build (yayım yok).
 #
 # Doldurulacaklar:
 #   image        UYGULAMA yerine uygulamanın adı: <uygulama>/<bileşen> (ör. hello/web); registry'de cr.catcore.dev/<uygulama>/<bileşen> olur.
 #   test-target  Dockerfile'daki test aşaması (BuildKit'te çalışır, runner'da araç kurmak gerekmez) ya da
 #   test-command runner'da çalışan komut (Docker yok; Docker/services isteyen testler GitHub-hosted'da ayrı iş).
-#   Çok bileşenli repo: aşağıdaki matrix'e bileşen ekle (her biri kendi Dockerfile'ı ve context'iyle).
-#   render       app: UYGULAMA; score-files: iş yükü başına bir Score dosyası, metadata.name <uygulama>-<bileşen>
-#                (bileşen matrix'tekiyle aynı), `image: .`. Ortam farkları <dosya>.staging.yaml / .production.yaml'da.
-#                Score'a geçmemiş (deploy reposunda chart'lı) uygulama render işini siler.
+#   Çok bileşenli repo: aşağıdaki matrix'e bileşen ekle (her biri kendi Dockerfile'ı ve context'iyle; bileşen adı
+#                infra kaydındaki components ve deploy değerlerindeki app.components.<bileşen> ile aynı).
 #
-# build-image.yml'i ve score-render.yml'i commit SHA'sıyla sabitle (Renovate günceller); etiket yorumda.
+# build-image.yml'i commit SHA'sıyla sabitle (Renovate günceller); etiket yorumda.
 name: ci
 
 on:
@@ -49,12 +47,3 @@ jobs:
       test-target: test
       build-args: |
         VERSION=${{ github.sha }}
-
-  # İmajlardan sonra: render aynı commit'in imaj etiketlerini (sha-<12>) digest'e çevirir.
-  render:
-    needs: image
-    uses: CatCoreDevs-Ent/.github/.github/workflows/score-render.yml@2e799a8cece770e59b268a773e47018068216684 # v1.2.0
-    with:
-      app: UYGULAMA
-      score-files: |
-        score.yaml
