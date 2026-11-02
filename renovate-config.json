@@ -67,7 +67,6 @@
         "aquasec/trivy",
         "google/go-containerregistry",
         "gitleaks/gitleaks",
-        "score-spec/score-k8s",
         "PyYAML"
       ],
       "dependencyDashboardApproval": true,
@@ -96,14 +95,6 @@
       "depNameTemplate": "{{#if (equals tool 'HELM')}}helm/helm{{/if}}{{#if (equals tool 'KUBECONFORM')}}yannh/kubeconform{{/if}}{{#if (equals tool 'KYVERNO')}}kyverno/kyverno{{/if}}{{#if (equals tool 'COSIGN')}}sigstore/cosign{{/if}}{{#if (equals tool 'CRANE')}}google/go-containerregistry{{/if}}{{#if (equals tool 'GITLEAKS')}}gitleaks/gitleaks{{/if}}",
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^v(?<version>.+)$"
-    },
-    {
-      "customType": "regex",
-      "description": "score-k8s (SCORE_K8S_VERSION, checksum'la indirilir; release etiketleri v'siz).",
-      "managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
-      "matchStrings": ["SCORE_K8S_VERSION: \"?(?<currentValue>\\d[^\\s\"]*)\"?"],
-      "depNameTemplate": "score-spec/score-k8s",
-      "datasourceTemplate": "github-releases"
     },
     {
       "customType": "regex",
