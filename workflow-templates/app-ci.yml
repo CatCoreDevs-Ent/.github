@@ -12,6 +12,9 @@
 #   test-command runner'da çalışan komut (Docker yok; Docker/services isteyen testler GitHub-hosted'da ayrı iş).
 #   Çok bileşenli repo: aşağıdaki matrix'e bileşen ekle (her biri kendi Dockerfile'ı ve context'iyle; bileşen adı
 #                infra kaydındaki components ve deploy değerlerindeki app.components.<bileşen> ile aynı).
+#   Özel bağımlılıklar (isteğe bağlı, secret gerekmez; Dockerfile örnekleri .github README → "Özel bağımlılıklar"):
+#     private-go-repos: catcore-sdk   özel Go modülü (BuildKit secret id=github_token, yalnızca okuma)
+#     npm-github-packages: true       GitHub Packages npm (id=npm_token); işe packages: read iznini de ver
 #
 # build-image.yml'i commit SHA'sıyla sabitle (Renovate günceller); etiket yorumda.
 name: ci
@@ -39,7 +42,11 @@ jobs:
           - component: web
             context: .
             dockerfile: Dockerfile
-    uses: CatCoreDevs-Ent/.github/.github/workflows/build-image.yml@c457afd1367b3b5da12a8b521f67373b63195fba # v1.0.0
+    # npm-github-packages kullanılıyorsa:
+    # permissions:
+    #   contents: read
+    #   packages: read
+    uses: CatCoreDevs-Ent/.github/.github/workflows/build-image.yml@0ac2e14e29e2a987e2a282f0b891b887aba9ff2d # v1.3.0
     with:
       image: UYGULAMA/${{ matrix.component }}
       context: ${{ matrix.context }}
@@ -47,3 +54,5 @@ jobs:
       test-target: test
       build-args: |
         VERSION=${{ github.sha }}
+      # private-go-repos: catcore-sdk
+      # npm-github-packages: true
