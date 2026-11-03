@@ -19,6 +19,15 @@ name: build-image
 # BUILDX_BUILDER, CI_REGISTRY); çağıranın secret vermesi gerekmez. Self-hosted runner'a sadece özel repolardan iş
 # gider: herkese açık bir repo bu workflow'u çağırırsa iş GitHub-hosted runner'da hata verip biter.
 #
+# Özel bağımlılıklar (isteğe bağlı; verilmezse hiçbir şey değişmez, çağıran yine secret vermez). Token'lar BuildKit'e
+# yalnızca secret mount olarak gider (id github_token, npm_token): build-arg, log, cache ve imaj katmanına girmez;
+# runner'daki test-command adımından sonra üretilir, build biter bitmez silinir.
+#   private-go-repos     catcore-ci-deps GitHub App'inin kurulum token'ı: yalnızca bu repolar, contents:read, en çok
+#                        1 saat, build'den sonra iptal. App kimliği runner'ın ortamında (CI_DEPS_APP_DIR: app_id,
+#                        private_key; infra tofu ci_deps_github_app). JWT ve token adım içinde üretilir, basılmaz.
+#   npm-github-packages  GitHub Packages (npm.pkg.github.com) için işin GITHUB_TOKEN'ı; izni çağıran iş verir
+#                        (permissions: packages: read).
+#
 # Araçlar sabit sürüm ve sha256 ile indirilir. Trivy'nin ikilisi seçilirken release imzası da doğrulandı
 # (cosign verify-blob, aquasecurity/trivy release workflow'unun kimliği); trivy-action/setup-trivy kullanılmaz
 # (CVE-2026-33634). Sürüm yükseltirken checksum release'teki *checksums.txt'den alınır.
@@ -70,6 +79,14 @@ on:
         description: "İşin süre sınırı"
         type: number
         default: 60
+      private-go-repos:
+        description: "Özel Go modüllerinin CatCoreDevs-Ent repoları (virgül ya da satırla, ör. catcore-sdk). BuildKit'te secret id=github_token (catcore-ci-deps App, contents:read)"
+        type: string
+        default: ""
+      npm-github-packages:
+        description: "true: işin GITHUB_TOKEN'ı (çağıran işte packages: read) BuildKit'te secret id=npm_token (GitHub Packages)"
+        type: boolean
+        default: false
     outputs:
       image:
         description: "Registry'li imaj adı (ör. cr.catcore.dev/hello/web); yayımlanmadıysa boş"
@@ -81,8 +98,9 @@ on:
         description: "sha-<12>; yayımlanmadıysa boş"
         value: ${{ jobs.build.outputs.tag }}
 
-permissions:
-  contents: read
+# Workflow düzeyinde permissions yok: işin GITHUB_TOKEN'ı çağıran işin izinleriyle gelir (şablon: contents: read;
+# npm-github-packages için ayrıca packages: read). Burada packages istenseydi, izni vermeyen her çağıran başlamadan
+# düşerdi. Token yalnızca checkout'a (persist-credentials: false) ve npm-github-packages'ta BuildKit'e gider.
 
 jobs:
   # github bağlamı çağıranındır. Herkese açık repoların işi self-hosted runner'a hiç gönderilmez.
@@ -90,6 +108,7 @@ jobs:
     if: ${{ github.event.repository.private != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions: {}
     steps:
       - name: Reddet
         run: |
@@ -125,6 +144,8 @@ jobs:
       TEST_TARGET: ${{ inputs.test-target }}
       TRIVY_FAIL_ON: ${{ inputs.trivy-severity }}
       PUSH_INPUT: ${{ inputs.push }}
+      PRIVATE_GO_REPOS: ${{ inputs.private-go-repos }}
+      NPM_GITHUB_PACKAGES: ${{ inputs.npm-github-packages }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - name: Girdiler ve runner ortamı
@@ -136,6 +157,21 @@ jobs:
           [[ "$TRIVY_FAIL_ON" =~ ^(CRITICAL|HIGH,CRITICAL|CRITICAL,HIGH)$ ]] ||
             { echo "::error::trivy-severity CRITICAL ya da HIGH,CRITICAL olmalı: $TRIVY_FAIL_ON"; exit 1; }
           : "${CI_REGISTRY:?runner ortamında CI_REGISTRY yok}" "${BUILDX_BUILDER:?runner ortamında BUILDX_BUILDER yok}"
+
+          go_repos=()
+          while IFS= read -r r; do
+            if [[ -z "$r" ]]; then continue; fi
+            [[ "$r" =~ ^[A-Za-z0-9._-]+$ ]] ||
+              { echo "::error::private-go-repos sadece CatCoreDevs-Ent repo adları içermeli (sahipsiz, ör. catcore-sdk): $r"; exit 1; }
+            go_repos+=("$r")
+          done < <(tr ', \t' '\n\n\n' <<<"$PRIVATE_GO_REPOS")
+          # Sadece dosyaların varlığına bakılır (içerik okunmaz).
+          if (( ${#go_repos[@]} > 0 )) &&
+             { [[ -z "${CI_DEPS_APP_DIR:-}" ]] || ! test -s "$CI_DEPS_APP_DIR/app_id" || ! test -s "$CI_DEPS_APP_DIR/private_key"; }; then
+            echo "::error::private-go-repos verildi ama runner'da catcore-ci-deps App kimliği yok (CI_DEPS_APP_DIR: app_id, private_key)."
+            echo "::error::Platform işi: infra tofu ci_deps_github_app → arc-runners/github-app-ci-deps (docs/asama-4-runbook.md, P2)."
+            exit 1
+          fi
 
           publish=false
           if [[ "$PUSH_INPUT" == true && -n "$DEFAULT_BRANCH" && "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
@@ -156,6 +192,7 @@ jobs:
             echo "TAG=sha-${GITHUB_SHA:0:12}"
             echo "TOOLS=$RUNNER_TEMP/bin"
             echo "TRIVY_CACHE_DIR=$RUNNER_TEMP/trivy"
+            echo "GO_REPOS=$(IFS=,; echo "${go_repos[*]}")"
           } >>"$GITHUB_ENV"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
           echo "imaj=$ref etiket=sha-${GITHUB_SHA:0:12} yayım=$publish (ref=$GITHUB_REF, varsayılan dal=$DEFAULT_BRANCH)"
@@ -203,6 +240,59 @@ jobs:
         if: steps.existing.outputs.digest == '' && inputs.test-command != ''
         run: bash -euo pipefail -c "$TEST_COMMAND"
 
+      # Özel bağımlılık token'ları test-command'dan SONRA üretilir (o adım görmez), dosyaya (0600, RUNNER_TEMP) yazılır ve
+      # buildx'e --secret id=…,src=… ile verilir. Değerler hiçbir zaman basılmaz; API hatasında yalnızca HTTP kodu ve
+      # GitHub'ın mesajı yazılır. App token'ı: JWT (App anahtarıyla, 9 dk) → org kurulumu → yalnızca GO_REPOS'a
+      # contents:read kurulum token'ı (create-github-app-token kullanılmaz: anahtarı girdi olarak ister).
+      - name: BuildKit sırları
+        if: steps.existing.outputs.digest == '' && (env.GO_REPOS != '' || inputs.npm-github-packages)
+        env:
+          NPM_TOKEN: ${{ inputs.npm-github-packages && github.token || '' }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          umask 077
+          d="$RUNNER_TEMP/build-secrets"
+          mkdir -p "$d"
+          echo "BUILD_SECRETS=$d" >>"$GITHUB_ENV"
+          if [[ -n "$GO_REPOS" ]]; then
+            b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+            api() { # api <yöntem> <yol> <başlık dosyası> [gövde] → HTTP kodu; yanıt $d/resp'te
+              local a=(-sS --retry 2 -o "$d/resp" -w '%{http_code}' -X "$1" -H @"$3"
+                       -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+              if [[ $# -gt 3 ]]; then a+=(-H 'Content-Type: application/json' --data "$4"); fi
+              curl "${a[@]}" "$GITHUB_API_URL$2"
+            }
+            fail() { echo "::error::catcore-ci-deps: $1 (HTTP $2: $(jq -r '.message // "?"' "$d/resp" 2>/dev/null))"; exit 1; }
+            now="$(date +%s)"
+            header="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
+            payload="$(jq -cn --arg iss "$(<"$CI_DEPS_APP_DIR/app_id")" --argjson now "$now" \
+                        '{iat: ($now - 60), exp: ($now + 540), iss: $iss}' | b64url)"
+            sig="$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -binary -sign "$CI_DEPS_APP_DIR/private_key" | b64url)"
+            echo "::add-mask::$sig"
+            printf 'Authorization: Bearer %s.%s.%s\n' "$header" "$payload" "$sig" >"$d/jwt.h"
+            unset sig
+            code="$(api GET "/orgs/$OWNER/installation" "$d/jwt.h")"
+            [[ "$code" == 200 ]] || fail "App $OWNER'a kurulu değil ya da anahtar geçersiz" "$code"
+            inst="$(jq -r '.id' "$d/resp")"
+            body="$(jq -cn --arg r "$GO_REPOS" '{repositories: ($r | split(",")), permissions: {contents: "read"}}')"
+            code="$(api POST "/app/installations/$inst/access_tokens" "$d/jwt.h" "$body")"
+            [[ "$code" == 201 ]] || fail "token alınamadı (repolar App'in kurulumunda mı: $GO_REPOS)" "$code"
+            tok="$(jq -r '.token // empty' "$d/resp")"
+            [[ -n "$tok" ]] || fail "yanıtta token yok" "$code"
+            echo "::add-mask::$tok"
+            printf '%s' "$tok" >"$d/github_token"
+            printf 'Authorization: Bearer %s\n' "$tok" >"$d/token.h"
+            echo "App token: $(jq -r '[.repositories[].name] | join(",")' "$d/resp"), izinler $(jq -c '.permissions' "$d/resp"), bitiş $(jq -r '.expires_at' "$d/resp")"
+            unset tok
+            rm -f "$d/jwt.h" "$d/resp"
+          fi
+          if [[ "$NPM_GITHUB_PACKAGES" == true ]]; then
+            [[ -n "$NPM_TOKEN" ]] || { echo "::error::işin GITHUB_TOKEN'ı boş"; exit 1; }
+            printf '%s' "$NPM_TOKEN" >"$d/npm_token"
+          fi
+          echo "BuildKit secret'ları: $(cd "$d" && ls github_token npm_token 2>/dev/null | paste -sd' ')"
+
       - name: Test (BuildKit)
         if: steps.existing.outputs.digest == '' && inputs.test-target != ''
         run: |
@@ -210,6 +300,9 @@ jobs:
           args=(--file "$DOCKERFILE" --platform "$PLATFORM" --target "$TEST_TARGET" --output type=cacheonly
                 --cache-from "type=registry,ref=$CACHE_REF")
           while IFS= read -r a; do if [[ -n "$a" ]]; then args+=(--build-arg "$a"); fi; done <<<"$BUILD_ARGS"
+          for s in github_token npm_token; do
+            if [[ -n "${BUILD_SECRETS:-}" && -f "$BUILD_SECRETS/$s" ]]; then args+=(--secret "id=$s,src=$BUILD_SECRETS/$s"); fi
+          done
           docker buildx build "${args[@]}" "$CONTEXT"
 
       # Push digest'le, etiketsiz: tarama ve imzadan önce hiçbir etiket (latest dahil) oluşmaz.
@@ -225,6 +318,9 @@ jobs:
                 --cache-from "type=registry,ref=$CACHE_REF")
           if [[ -n "$TARGET" ]]; then args+=(--target "$TARGET"); fi
           while IFS= read -r a; do if [[ -n "$a" ]]; then args+=(--build-arg "$a"); fi; done <<<"$BUILD_ARGS"
+          for s in github_token npm_token; do
+            if [[ -n "${BUILD_SECRETS:-}" && -f "$BUILD_SECRETS/$s" ]]; then args+=(--secret "id=$s,src=$BUILD_SECRETS/$s"); fi
+          done
           if [[ "$PUBLISH" == true ]]; then
             args+=(--metadata-file "$meta"
                    --output "type=image,name=$REF,push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true"
@@ -239,6 +335,18 @@ jobs:
             echo "digest=$digest" >>"$GITHUB_OUTPUT"
             echo "push: $REF@$digest (etiketsiz)"
           fi
+
+      # Build başarısız olsa da (always) App token'ı iptal edilir ve dosyalar silinir; sonraki adımlar onları görmez.
+      - name: BuildKit sırlarını sil
+        if: always() && env.BUILD_SECRETS != ''
+        run: |
+          set -uo pipefail
+          if [[ -s "$BUILD_SECRETS/token.h" ]]; then
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H @"$BUILD_SECRETS/token.h" \
+                    -H 'Accept: application/vnd.github+json' "$GITHUB_API_URL/installation/token")" || code="istek başarısız"
+            echo "App token iptali: HTTP $code"
+          fi
+          rm -rf "$BUILD_SECRETS"
 
       # Tek tarama, rapor JSON'da (bütün paketler: SBOM bundan çıkar). Kapı ikinci çağrıda (önbellekten, saniyeler):
       # sadece düzeltmesi olan (--ignore-unfixed) açıklar sayılır. İstisna: repo kökünde .trivyignore (gerekçeli).
