@@ -32,6 +32,10 @@ name: build-image
 #   npm-github-packages  GitHub Packages (npm.pkg.github.com) için işin GITHUB_TOKEN'ı; izni çağıran iş verir
 #                        (permissions: packages: read).
 #
+# İmajın created zamanı (isteğe bağlı): created-from-commit: true → SOURCE_DATE_EPOCH = commit zamanı (Kargo NewestBuild
+# sırası commit sırasını izler). Bedel: BuildKit epoch'u WORKDIR'a yazar, ilk WORKDIR'dan sonraki katmanlar her
+# commit'te önbelleksiz koşar. Dosya zamanları değişmez (rewrite-timestamp yok).
+#
 # Araçlar sabit sürüm ve sha256 ile indirilir. Trivy'nin ikilisi seçilirken release imzası da doğrulandı
 # (cosign verify-blob, aquasecurity/trivy release workflow'unun kimliği); trivy-action/setup-trivy kullanılmaz
 # (CVE-2026-33634). Sürüm yükseltirken checksum release'teki *checksums.txt'den alınır.
@@ -91,6 +95,10 @@ on:
         description: "private-repos'un eski adı (Go modülleri, ör. catcore-sdk); ikisi birleşir"
         type: string
         default: ""
+      created-from-commit:
+        description: "true: imajın created zamanı commit zamanı (SOURCE_DATE_EPOCH; Kargo NewestBuild). Bedel: ilk WORKDIR'dan sonraki katmanlar her commit'te önbelleksiz"
+        type: boolean
+        default: false
       npm-github-packages:
         description: "true: işin GITHUB_TOKEN'ı (çağıran işte packages: read) BuildKit'te secret id=npm_token (GitHub Packages)"
         type: boolean
@@ -210,6 +218,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # buildx ortamdaki SOURCE_DATE_EPOCH'u build-arg'a taşır; BuildKit config ve history created'ını ona eşitler.
+      # Dosya zamanları değişmez (rewrite-timestamp yok). Test (BuildKit) ve build aynı değeri görür (önbellek ortak).
+      - name: Commit zamanı
+        if: inputs.created-from-commit
+        run: |
+          set -euo pipefail
+          epoch="$(git log -1 --format=%ct HEAD)"
+          [[ "$epoch" =~ ^[0-9]+$ ]] || { echo "::error::commit zamanı okunamadı"; exit 1; }
+          echo "SOURCE_DATE_EPOCH=$epoch" >>"$GITHUB_ENV"
+          echo "created: $(date -u -d "@$epoch" +%FT%TZ) ($GITHUB_SHA)"
 
       # Runner ayrıcalıksız (sudo yok): araçlar iş klasörüne kurulur.
       - name: Araçlar (sabit sürüm, sha256)
