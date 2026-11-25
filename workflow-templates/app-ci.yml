@@ -13,7 +13,9 @@
 #   Çok bileşenli repo: aşağıdaki matrix'e bileşen ekle (her biri kendi Dockerfile'ı ve context'iyle; bileşen adı
 #                infra kaydındaki components ve deploy değerlerindeki app.components.<bileşen> ile aynı).
 #   Özel bağımlılıklar (isteğe bağlı, secret gerekmez; Dockerfile örnekleri .github README → "Özel bağımlılıklar"):
-#     private-go-repos: catcore-sdk   özel Go modülü (BuildKit secret id=github_token, yalnızca okuma)
+#     private-repos: ccp-sdk          özel git bağımlılığı: pnpm/cargo/go (BuildKit secret id=github_token, git_config;
+#                                     yalnızca okuma). Eski adı private-go-repos aynen çalışır.
+#     created-from-commit: true       imajın created zamanı commit zamanı (Kargo sırası; ilk WORKDIR'dan sonra önbellek yok)
 #     npm-github-packages: true       GitHub Packages npm (id=npm_token); işe packages: read iznini de ver
 #
 # build-image.yml'i commit SHA'sıyla sabitle (Renovate günceller); etiket yorumda.
@@ -46,7 +48,7 @@ jobs:
     # permissions:
     #   contents: read
     #   packages: read
-    uses: CatCoreDevs-Ent/.github/.github/workflows/build-image.yml@0ac2e14e29e2a987e2a282f0b891b887aba9ff2d # v1.3.0
+    uses: CatCoreDevs-Ent/.github/.github/workflows/build-image.yml@cff5acd35a4cc152a9af31186c86d7e750b092d7 # v1.4.0
     with:
       image: UYGULAMA/${{ matrix.component }}
       context: ${{ matrix.context }}
@@ -54,5 +56,6 @@ jobs:
       test-target: test
       build-args: |
         VERSION=${{ github.sha }}
-      # private-go-repos: catcore-sdk
+      # private-repos: ccp-sdk
+      # created-from-commit: true
       # npm-github-packages: true
